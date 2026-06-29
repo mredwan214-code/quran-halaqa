@@ -1174,41 +1174,66 @@ let waPhone = '';
 
 function showWhatsAppPrompt(rec, sObj) {
   const stars = n => '★'.repeat(n) + '☆'.repeat(5-n);
-  const dateStr = new Date(rec.date).toLocaleDateString('ar-EG', {weekday:'long', day:'numeric', month:'long'});
-  const phoneType = sObj.phoneType || 'ولي الأمر';
+  const dateStr = new Date(rec.date).toLocaleDateString('ar-EG', {weekday:'long', day:'numeric', month:'long', year:'numeric'});
   const nl = '\n';
 
-  let msg = 'السلام عليكم ورحمة الله وبركاته 🌿' + nl;
-  msg += phoneType + ' الطالب/ة *' + rec.student + '*' + nl + nl;
-  msg += '📅 تقرير جلسة ' + dateStr + nl;
-  msg += '─'.repeat(28) + nl + nl;
+  // get the previous session to know what was recited today
+  const prevRecs = records.filter(r => r.student === rec.student && !r.attendance_only && r.id !== rec.id)
+                          .sort((a,b) => a.date > b.date ? -1 : 1);
+  const prevRec = prevRecs[0];
 
-  // اللوح الجديد
-  if (rec.newLoh && rec.newLoh.sura) {
-    msg += '📝 *اللوح الجديد*' + nl;
-    msg += 'سورة ' + rec.newLoh.sura + ' (' + rec.newLoh.from + '–' + rec.newLoh.to + ')' + nl;
-  }
-  if (rec.loh && rec.loh.score) {
-    msg += '⭐ تقييم اللوح: ' + rec.loh.score + '/100 ' + starsText(rec.loh.score) + ' ' + scoreName(rec.loh.score) + nl;
-  }
-  msg += nl;
+  let msg = 'السلام عليكم ورحمة الله وبركاته 🌿' + nl + nl;
+  msg += '📅 *تقييم ' + rec.student + ' اليوم*' + nl;
+  msg += dateStr + nl;
+  msg += '─'.repeat(30) + nl + nl;
 
-  // الماضي الجديد
-  if (rec.newMadi && rec.newMadi.length) {
-    msg += '📝 *الماضي الجديد*' + nl;
-    rec.newMadi.forEach(function(m) { msg += 'سورة ' + m.sura + ' (' + m.from + '–' + m.to + ')' + nl; });
-  }
-  if (rec.madi && rec.madi.score) {
-    msg += '⭐ تقييم الماضي: ' + rec.madi.score + '/100 ' + starsText(rec.madi.score) + ' ' + scoreName(rec.madi.score) + nl;
-  }
-  msg += nl;
+  // ما تم تسميعه اليوم (من الجلسة السابقة newLoh/newMadi)
+  const todayLoh = prevRec && prevRec.newLoh && prevRec.newLoh.sura ? prevRec.newLoh : null;
+  const todayMadi = prevRec && prevRec.newMadi && prevRec.newMadi.filter(m=>m.sura).length ? prevRec.newMadi.filter(m=>m.sura) : null;
 
-  if (rec.tajweed && rec.tajweed.sura) {
-    msg += '📐 *مراجعة التجويد*' + nl;
-    msg += 'سورة ' + rec.tajweed.sura + ' (' + rec.tajweed.from + '–' + rec.tajweed.to + ') ';
-    msg += rec.tajweed.score ? rec.tajweed.score + '/100 ' + starsText(rec.tajweed.score) : stars(rec.tajweed.stars);
+  if (todayLoh || todayMadi || (rec.loh && rec.loh.score) || (rec.madi && rec.madi.score)) {
+    msg += '📖 *ما تم تسميعه اليوم*' + nl;
+    if (todayLoh) {
+      msg += '• لوح: سورة ' + todayLoh.sura + ' (' + todayLoh.from + '–' + todayLoh.to + ')';
+      if (rec.loh && rec.loh.score) msg += '  ←  ' + rec.loh.score + '/100 ' + starsText(rec.loh.score) + ' ' + scoreName(rec.loh.score);
+      msg += nl;
+    } else if (rec.loh && rec.loh.score) {
+      msg += '• لوح: ' + rec.loh.score + '/100 ' + starsText(rec.loh.score) + ' ' + scoreName(rec.loh.score) + nl;
+    }
+    if (todayMadi) {
+      todayMadi.forEach(function(m) {
+        msg += '• ماضي: سورة ' + m.sura + ' (' + m.from + '–' + m.to + ')';
+        if (rec.madi && rec.madi.score) msg += '  ←  ' + rec.madi.score + '/100 ' + starsText(rec.madi.score) + ' ' + scoreName(rec.madi.score);
+        msg += nl;
+      });
+    } else if (rec.madi && rec.madi.score) {
+      msg += '• ماضي: ' + rec.madi.score + '/100 ' + starsText(rec.madi.score) + ' ' + scoreName(rec.madi.score) + nl;
+    }
     msg += nl;
-    if (rec.tajweed.note) msg += 'ملاحظة: ' + rec.tajweed.note + nl;
+  }
+
+  // التجويد
+  if (rec.tajweed && rec.tajweed.sura) {
+    msg += '📐 *التجويد*' + nl;
+    msg += '• سورة ' + rec.tajweed.sura + ' (' + rec.tajweed.from + '–' + rec.tajweed.to + ')';
+    msg += rec.tajweed.score ? '  ←  ' + rec.tajweed.score + '/100 ' + starsText(rec.tajweed.score) + ' ' + scoreName(rec.tajweed.score) : '  ' + stars(rec.tajweed.stars);
+    msg += nl;
+    if (rec.tajweed.note) msg += '• ملاحظة: ' + rec.tajweed.note + nl;
+    msg += nl;
+  }
+
+  // المهمة الجديدة
+  const hasNewTask = (rec.newLoh && rec.newLoh.sura) || (rec.newMadi && rec.newMadi.length);
+  if (hasNewTask) {
+    msg += '📝 *المهمة الجديدة للجلسة القادمة*' + nl;
+    if (rec.newLoh && rec.newLoh.sura) {
+      msg += '• لوح: سورة ' + rec.newLoh.sura + ' (' + rec.newLoh.from + '–' + rec.newLoh.to + ')' + nl;
+    }
+    if (rec.newMadi && rec.newMadi.length) {
+      rec.newMadi.forEach(function(m) {
+        msg += '• ماضي: سورة ' + m.sura + ' (' + m.from + '–' + m.to + ')' + nl;
+      });
+    }
     msg += nl;
   }
 
