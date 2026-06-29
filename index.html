@@ -410,6 +410,36 @@
 <div class="toast" id="toast">✓ تم الحفظ بنجاح</div>
 
 <script>
+const firebaseConfig = {
+  apiKey: "AIzaSyCLzsd-tyAPKoS6HQ-Kw6LEwaxPSibbKSg",
+  authDomain: "quran-app-abe52.firebaseapp.com",
+  databaseURL: "https://quran-app-abe52-default-rtdb.firebaseio.com",
+  projectId: "quran-app-abe52",
+  storageBucket: "quran-app-abe52.firebasestorage.app",
+  messagingSenderId: "484959710944",
+  appId: "1:484959710944:web:454059b1f2136c0d73aa85"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+function saveRecordToFirebase(rec) {
+  try { db.ref('records').push(rec); } catch(e) { console.warn('Firebase record error:', e); }
+}
+
+function saveStudentToFirebase(student) {
+  try {
+    db.ref('students').orderByChild('name').equalTo(student.name)
+      .once('value', snap => {
+        if (snap.exists()) {
+          const key = Object.keys(snap.val())[0];
+          db.ref('students/' + key).set(student);
+        } else {
+          db.ref('students').push(student);
+        }
+      });
+  } catch(e) { console.warn('Firebase student error:', e); }
+}
+
 const STAR_LABELS = ['','ضعيف','مقبول','جيد','جيد جداً','ممتاز'];
 const SHEETS_URL = 'https://script.google.com/macros/s/AKfycbzw3X51RGVsjg0IhXbD1Tbv0ZZ09bUP8jiM4ufEU3fVRw2Ow3nbQqVosvzeAQId1_zQjQ/exec';
 
