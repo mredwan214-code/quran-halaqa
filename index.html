@@ -144,6 +144,83 @@
 <!-- Firebase -->
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyCLzsd-tyAPKoS6HQ-Kw6LEwaxPSibbKSg",
+  authDomain: "quran-app-abe52.firebaseapp.com",
+  databaseURL: "https://quran-app-abe52-default-rtdb.firebaseio.com",
+  projectId: "quran-app-abe52",
+  storageBucket: "quran-app-abe52.firebasestorage.app",
+  messagingSenderId: "484959710944",
+  appId: "1:484959710944:web:454059b1f2136c0d73aa85"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+function saveRecordToFirebase(rec) {
+  try {
+    const key = 'rec_' + rec.id;
+    db.ref('records/' + key).set(rec);
+  } catch(e) { console.warn('Firebase record save failed:', e); }
+}
+
+function saveStudentToFirebase(student) {
+  try {
+    db.ref('students').orderByChild('name').equalTo(student.name)
+      .once('value', snap => {
+        if (snap.exists()) {
+          const key = Object.keys(snap.val())[0];
+          db.ref('students/' + key).set(student);
+        } else {
+          db.ref('students').push(student);
+        }
+      });
+  } catch(e) { console.warn('Firebase student save failed:', e); }
+}
+
+function loadFromFirebase() {
+  // Load records from Firebase and merge with localStorage
+  db.ref('records').once('value', snap => {
+    if (!snap.exists()) return;
+    const fbRecords = Object.values(snap.val() || {});
+    const existingIds = new Set(records.map(r => String(r.id)));
+    let added = 0;
+    fbRecords.forEach(r => {
+      if (!existingIds.has(String(r.id))) {
+        records.push(r);
+        added++;
+      }
+    });
+    if (added > 0) {
+      saveData();
+      renderLog();
+      renderStats();
+      console.log('Loaded ' + added + ' records from Firebase');
+    }
+  });
+
+  // Load students from Firebase and merge
+  db.ref('students').once('value', snap => {
+    if (!snap.exists()) return;
+    const fbStudents = Object.values(snap.val() || {});
+    const existingNames = new Set(students.map(s => getStudentName(s)));
+    let added = 0;
+    fbStudents.forEach(s => {
+      if (s.name && !existingNames.has(s.name)) {
+        students.push(s);
+        added++;
+      }
+    });
+    if (added > 0) {
+      saveData();
+      renderStudentSelect();
+      renderStudentList();
+      updateHeader();
+      console.log('Loaded ' + added + ' students from Firebase');
+    }
+  });
+}
+</script>
 </head>
 <body>
 
@@ -702,6 +779,7 @@ function init() {
   renderStudentSelect();
   renderStudentList();
   updateHeader();
+  loadFromFirebase();
 }
 
 function updateHeader() {
