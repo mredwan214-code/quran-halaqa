@@ -579,6 +579,53 @@ function saveData() {
   localStorage.setItem('qr_records', JSON.stringify(records));
 }
 
+// ترقية السنة الدراسية كل أول أكتوبر
+const GRADES = [
+  'الروضة الأولى',
+  'الروضة الثانية',
+  'الصف الأول الابتدائي',
+  'الصف الثاني الابتدائي',
+  'الصف الثالث الابتدائي',
+  'الصف الرابع الابتدائي',
+  'الصف الخامس الابتدائي',
+  'الصف السادس الابتدائي',
+  'الصف الأول الإعدادي',
+  'الصف الثاني الإعدادي',
+  'الصف الثالث الإعدادي',
+  'الصف الأول الثانوي',
+  'الصف الثاني الثانوي',
+  'الصف الثالث الثانوي',
+];
+
+function promoteGradesIfNeeded() {
+  const now = new Date();
+  const yearKey = 'qr_grade_promoted_' + now.getFullYear();
+  // run only on or after Oct 1 of current year, and only once per year
+  if (now.getMonth() < 9) return; // month is 0-indexed, 9 = October
+  if (localStorage.getItem(yearKey)) return;
+
+  let changed = 0;
+  students = students.map(s => {
+    const idx = GRADES.indexOf(s.grade);
+    if (idx === -1 || idx === GRADES.length - 1) return s; // not found or last grade
+    const promoted = { ...s, grade: GRADES[idx + 1] };
+    saveStudentToFirebase(promoted);
+    changed++;
+    return promoted;
+  });
+
+  if (changed > 0) {
+    saveData();
+    renderStudentList();
+    renderStudentSelect();
+    console.log('Promoted ' + changed + ' students to next grade');
+    localStorage.setItem(yearKey, '1');
+    showToast('🎓 تم ترقية ' + changed + ' طالب للسنة الدراسية الجديدة');
+  } else {
+    localStorage.setItem(yearKey, '1');
+  }
+}
+
 // السور مرتبة عكسياً (الناس أولاً)
 const SURAS_REVERSED = [...SURAS].reverse();
 
@@ -783,6 +830,7 @@ function init() {
   renderStudentList();
   updateHeader();
   loadFromFirebase();
+  setTimeout(promoteGradesIfNeeded, 2000); // run after Firebase loads
 }
 
 function updateHeader() {
@@ -1355,10 +1403,11 @@ function closeWaModal(e) {
     document.getElementById('wa-modal').classList.remove('open');
 }
 
-function showToast() {
+function showToast(msg) {
   const t=document.getElementById('toast');
+  t.textContent = msg || '✓ تم الحفظ بنجاح';
   t.classList.add('show');
-  setTimeout(()=>t.classList.remove('show'),2200);
+  setTimeout(()=>t.classList.remove('show'),2800);
 }
 
 init();
