@@ -239,9 +239,14 @@ function loadFromFirebase() {
     <input type="date" id="session-date">
   </div>
   <div class="card">
-    <div class="field">
+    <div class="field" style="position:relative">
       <label>الطالب</label>
-      <select id="student-select" onchange="onStudentChange()"><option value="">— اختر طالباً —</option></select>
+      <input type="text" id="student-search" placeholder="ابحث عن طالب..." autocomplete="off"
+        oninput="filterStudents()" onfocus="showStudentDropdown()" onblur="hideStudentDropdown()"
+        style="padding-left:32px">
+      <span style="position:absolute;right:12px;top:34px;font-size:15px;pointer-events:none">🔍</span>
+      <input type="hidden" id="student-select">
+      <div id="student-dropdown" style="display:none;position:absolute;top:100%;right:0;left:0;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);z-index:100;max-height:240px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,0.18);margin-top:2px"></div>
     </div>
   </div>
 
@@ -738,7 +743,6 @@ function getMadiData() {
 
 function onStudentChange() {
   const name = document.getElementById('student-select').value;
-  if (!name) { document.getElementById('prev-task-card').style.display='none'; return; }
   // find last non-attendance-only record for this student
   const recs = records.filter(r=>r.student===name && !r.attendance_only).sort((a,b)=>a.date>b.date?-1:1);
   const last = recs[0];
@@ -790,11 +794,62 @@ function updateHeader() {
 function getStudentName(s) { return typeof s === 'string' ? s : s.name; }
 
 function renderStudentSelect() {
-  const sel = document.getElementById('student-select');
-  const cur = sel.value;
-  sel.innerHTML = '<option value="">— اختر طالباً —</option>' +
-    students.map(s => { const n=getStudentName(s); return `<option value="${n}">${n}</option>`; }).join('');
-  if (students.find(s=>getStudentName(s)===cur)) sel.value = cur;
+  // just re-render dropdown if open
+  const dd = document.getElementById('student-dropdown');
+  if (dd && dd.style.display === 'block') filterStudents();
+}
+
+let studentHideTimer = null;
+
+function filterStudents() {
+  const query = document.getElementById('student-search').value.trim();
+  const filtered = query
+    ? students.filter(s => getStudentName(s).includes(query))
+    : students;
+  renderStudentDropdown(filtered);
+  showStudentDropdown();
+  // clear selection if user is typing
+  document.getElementById('student-select').value = '';
+}
+
+function renderStudentDropdown(list) {
+  const dd = document.getElementById('student-dropdown');
+  if (!list.length) {
+    dd.innerHTML = '<div style="padding:12px 14px;color:var(--text-hint);font-size:14px">لا توجد نتائج</div>';
+    return;
+  }
+  dd.innerHTML = list.map(s => {
+    const name = getStudentName(s);
+    const initials = name.trim().split(' ').slice(0,2).map(w=>w[0]).join('');
+    return `<div onmousedown="selectStudent('${name.replace(/'/g,"\\'")}')
+" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border);font-size:14px" 
+      onmouseover="this.style.background='var(--green-light)'" onmouseout="this.style.background=''">
+      <div style="width:30px;height:30px;border-radius:50%;background:var(--green-light);color:var(--green);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">${initials}</div>
+      <span>${name}</span>
+    </div>`;
+  }).join('');
+}
+
+function selectStudent(name) {
+  document.getElementById('student-search').value = name;
+  document.getElementById('student-select').value = name;
+  document.getElementById('student-dropdown').style.display = 'none';
+  onStudentChange();
+}
+
+function showStudentDropdown() {
+  clearTimeout(studentHideTimer);
+  const dd = document.getElementById('student-dropdown');
+  const query = document.getElementById('student-search').value.trim();
+  const filtered = query ? students.filter(s=>getStudentName(s).includes(query)) : students;
+  renderStudentDropdown(filtered);
+  dd.style.display = 'block';
+}
+
+function hideStudentDropdown() {
+  studentHideTimer = setTimeout(() => {
+    document.getElementById('student-dropdown').style.display = 'none';
+  }, 200);
 }
 
 function renderStudentList() {
@@ -981,7 +1036,9 @@ function saveRecord() {
 }
 
 function resetForm() {
-  // clear text inputs safely
+  // clear student search
+  const ss = document.getElementById('student-search'); if(ss) ss.value='';
+  document.getElementById('student-select').value = '';
   ['loh-from','loh-to','tajweed-from','tajweed-to','tajweed-note','general-note'].forEach(id=>{
     const el=document.getElementById(id); if(el) el.value='';
   });
