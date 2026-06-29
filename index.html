@@ -703,9 +703,12 @@ function onStudentChange() {
   const name = document.getElementById('student-select').value;
   if (!name) { document.getElementById('prev-task-card').style.display='none'; return; }
   // find last non-attendance-only record for this student
-  const recs = records.filter(r=>r.student===name && !r.attendance_only).sort((a,b)=> Number(b.id) - Number(a.id));
-  const last = recs[0];
-  console.log('last record for', name, last);
+  // find the most recent session: prefer latest by date, then by insertion order (last pushed wins on tie)
+  const recs = records.filter(r=>r.student===name && !r.attendance_only);
+  let last = null;
+  for (let i = 0; i < recs.length; i++) {
+    if (!last || recs[i].date >= last.date) last = recs[i]; // >= so later insertion on same date wins
+  }
   if (!last) { document.getElementById('prev-task-card').style.display='none'; return; }
 
   document.getElementById('prev-task-card').style.display='block';
@@ -919,7 +922,7 @@ function saveRecord() {
   if (!validateAyah('loh') || !validateAyah('madi')) { alert('يوجد خطأ في أرقام الآيات'); return; }
   const lohSura = document.getElementById('loh-sura').value;
   const rec = {
-    id: Date.now(),
+    id: Date.now() + '_' + (records.length),
     date: document.getElementById('session-date').value,
     student,
     loh: { score: starScores['prev-loh']||0, stars: scoreToStars(starScores['prev-loh']||0) },
