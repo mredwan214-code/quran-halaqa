@@ -199,24 +199,23 @@ function loadFromFirebase() {
     }
   });
 
-  // Load students from Firebase and merge
+  // Load students from Firebase — Firebase is source of truth
   db.ref('students').once('value', snap => {
-    if (!snap.exists()) return;
-    const fbStudents = Object.values(snap.val() || {});
-    const existingNames = new Set(students.map(s => getStudentName(s)));
-    let added = 0;
-    fbStudents.forEach(s => {
-      if (s.name && !existingNames.has(s.name)) {
-        students.push(s);
-        added++;
-      }
-    });
-    if (added > 0) {
+    if (!snap.exists()) {
+      // No students in Firebase yet → push all local students up
+      students.forEach(s => saveStudentToFirebase(s));
+      console.log('Pushed ' + students.length + ' students to Firebase');
+      return;
+    }
+    const fbStudents = Object.values(snap.val() || {}).filter(s => s && s.name);
+    if (fbStudents.length > 0) {
+      // Replace local students with Firebase data
+      students = fbStudents;
       saveData();
       renderStudentSelect();
       renderStudentList();
       updateHeader();
-      console.log('Loaded ' + added + ' students from Firebase');
+      console.log('Synced ' + fbStudents.length + ' students from Firebase');
     }
   });
 }
