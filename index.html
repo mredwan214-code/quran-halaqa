@@ -1231,19 +1231,28 @@ let waPhone = '';
 
 function showWhatsAppPrompt(rec, sObj) {
   const stars = n => '★'.repeat(n) + '☆'.repeat(5-n);
-  const dateStr = new Date(rec.date).toLocaleDateString('ar-EG', {weekday:'long', day:'numeric', month:'long'});
+  const dateStr = new Date(rec.date).toLocaleDateString('ar-EG', {weekday:'long', day:'numeric', month:'long', year:'numeric'});
   const phoneType = sObj.phoneType || 'ولي الأمر';
   const nl = '\n';
 
+  // helper: show sura with ayat range only if both from and to are filled
+  function suraText(sura, from, to) {
+    if (from && to) return 'سورة ' + sura + ' (من آية ' + from + ' إلى ' + to + ')';
+    return 'سورة ' + sura;
+  }
+
+  // get first name only
+  const firstName = rec.student.trim().split(' ')[0];
+
   let msg = 'السلام عليكم ورحمة الله وبركاته 🌿' + nl;
-  msg += phoneType + ' الطالب/ة *' + rec.student + '*' + nl + nl;
-  msg += '📅 تقرير جلسة ' + dateStr + nl;
+  msg += phoneType + ' الطالب/ة *' + firstName + '*' + nl;
+  msg += '📅 ' + dateStr + nl;
   msg += '─'.repeat(28) + nl + nl;
 
   // اللوح الجديد
   if (rec.newLoh && rec.newLoh.sura) {
     msg += '📝 *اللوح الجديد*' + nl;
-    msg += 'سورة ' + rec.newLoh.sura + ' (' + rec.newLoh.from + '–' + rec.newLoh.to + ')' + nl;
+    msg += suraText(rec.newLoh.sura, rec.newLoh.from, rec.newLoh.to) + nl;
   }
   if (rec.loh && rec.loh.score) {
     msg += '⭐ تقييم اللوح: ' + rec.loh.score + '/100 ' + renderStarsHTML(rec.loh.score) + ' ' + scoreName(rec.loh.score) + nl;
@@ -1253,7 +1262,7 @@ function showWhatsAppPrompt(rec, sObj) {
   // الماضي الجديد
   if (rec.newMadi && rec.newMadi.length) {
     msg += '📝 *الماضي الجديد*' + nl;
-    rec.newMadi.forEach(function(m) { msg += 'سورة ' + m.sura + ' (' + m.from + '–' + m.to + ')' + nl; });
+    rec.newMadi.forEach(function(m) { msg += suraText(m.sura, m.from, m.to) + nl; });
   }
   if (rec.madi && rec.madi.score) {
     msg += '⭐ تقييم الماضي: ' + rec.madi.score + '/100 ' + renderStarsHTML(rec.madi.score) + ' ' + scoreName(rec.madi.score) + nl;
@@ -1262,7 +1271,7 @@ function showWhatsAppPrompt(rec, sObj) {
 
   if (rec.tajweed && rec.tajweed.sura) {
     msg += '📐 *مراجعة التجويد*' + nl;
-    msg += 'سورة ' + rec.tajweed.sura + ' (' + rec.tajweed.from + '–' + rec.tajweed.to + ') ';
+    msg += suraText(rec.tajweed.sura, rec.tajweed.from, rec.tajweed.to) + ' ';
     msg += rec.tajweed.score ? rec.tajweed.score + '/100 ' + renderStarsHTML(rec.tajweed.score) : stars(rec.tajweed.stars);
     msg += nl;
     if (rec.tajweed.note) msg += 'ملاحظة: ' + rec.tajweed.note + nl;
