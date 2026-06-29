@@ -1030,9 +1030,11 @@ function renderStats() {
   // count ayat
   let lohAyat = 0, madiAyat = 0, tajweedAyat = 0;
   records.forEach(r => {
-    lohAyat += countAyat(r.loh.from, r.loh.to);
-    if (Array.isArray(r.madi)) r.madi.forEach(m=>{ madiAyat += countAyat(m.from, m.to); });
-    else if (r.madi && r.madi.sura) madiAyat += countAyat(r.madi.from, r.madi.to);
+    // ayat live in newLoh/newMadi (the assigned task); fall back to legacy loh/madi if present
+    const lohObj = (r.newLoh && r.newLoh.sura) ? r.newLoh : (r.loh && r.loh.sura ? r.loh : null);
+    if (lohObj) lohAyat += countAyat(lohObj.from, lohObj.to);
+    const madiArr = (r.newMadi && r.newMadi.length) ? r.newMadi : (Array.isArray(r.madi) ? r.madi : (r.madi && r.madi.sura ? [r.madi] : []));
+    madiArr.forEach(m=>{ if (m && m.sura) madiAyat += countAyat(m.from, m.to); });
     if (r.tajweed && r.tajweed.sura) tajweedAyat += countAyat(r.tajweed.from, r.tajweed.to);
   });
   const totalAyat = lohAyat + madiAyat + tajweedAyat;
@@ -1055,9 +1057,11 @@ function renderStats() {
     if (!recs.length) return null;
     const avg = Math.round(recs.filter(r=>r.loh.score).reduce((a,r,_,arr)=>a+r.loh.score/arr.length,0)) || Math.round(recs.reduce((a,r)=>a+r.loh.stars,0)/recs.length*20);
     const ayat = recs.reduce((a,r)=> {
-      let sum = a + countAyat(r.loh.from,r.loh.to);
-      if (Array.isArray(r.madi)) r.madi.forEach(m=>{ sum += countAyat(m.from,m.to); });
-      else if (r.madi&&r.madi.sura) sum += countAyat(r.madi.from,r.madi.to);
+      let sum = a;
+      const lohObj = (r.newLoh && r.newLoh.sura) ? r.newLoh : (r.loh && r.loh.sura ? r.loh : null);
+      if (lohObj) sum += countAyat(lohObj.from, lohObj.to);
+      const madiArr = (r.newMadi && r.newMadi.length) ? r.newMadi : (Array.isArray(r.madi) ? r.madi : (r.madi && r.madi.sura ? [r.madi] : []));
+      madiArr.forEach(m=>{ if (m && m.sura) sum += countAyat(m.from, m.to); });
       return sum;
     }, 0);
     // نسبة الحضور: عدد الجلسات الفريدة / إجمالي أيام الحلقة
