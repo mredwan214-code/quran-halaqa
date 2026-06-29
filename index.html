@@ -893,7 +893,7 @@ function saveRecord() {
   const sObj = students.find(s=>getStudentName(s)===student);
   resetForm();
   showToast();
-  showWhatsAppPrompt(rec, sObj);
+  setTimeout(() => showWhatsAppPrompt(rec, sObj), 1800);
 }
 
 function resetForm() {
