@@ -1099,34 +1099,8 @@ function scoreToStars(score) {
   return Math.floor(scoreToHalfStars(score));
 }
 
-function starsText(score) {
-  const half = scoreToHalfStars(score);
-  const full = Math.floor(half);
-  const hasHalf = (half % 1) !== 0;
-  const empty = 5 - full - (hasHalf ? 1 : 0);
-  return '★'.repeat(full) + (hasHalf ? '½' : '') + '☆'.repeat(empty);
-}
-
-function renderStarsHTML(score) {
-  const half = scoreToHalfStars(score); // e.g. 3.5
-  const full = Math.floor(half);
-  const hasHalf = (half % 1) !== 0;
-  const total = 5;
-  const uid = 'sg' + Math.random().toString(36).slice(2,7);
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${total*18}" height="16" viewBox="0 0 ${total*18} 16" style="vertical-align:middle;display:inline-block">`;
-  svg += `<defs><linearGradient id="${uid}-h" x1="0" x2="1" y1="0" y2="0"><stop offset="50%" stop-color="#c49a1a"/><stop offset="50%" stop-color="#ddd"/></linearGradient></defs>`;
-  for (let i = 0; i < total; i++) {
-    const x = i * 18;
-    let fill;
-    if (i < full) fill = '#c49a1a';
-    else if (i === full && hasHalf) fill = `url(#${uid}-h)`;
-    else fill = '#ddd';
-    // star path centered in 18×16 box
-    svg += `<polygon points="9,1 11.5,6.5 17.5,7.3 13,11.5 14.2,17.5 9,14.5 3.8,17.5 5,11.5 0.5,7.3 6.5,6.5" transform="translate(${x},0) scale(0.88)" fill="${fill}"/>`;
-  }
-  svg += '</svg>';
-  return svg;
-}
+function starsText(score) { return ''; }
+function renderStarsHTML(score) { return ''; }
 
 function scoreName(score) {
   const s = parseInt(score);
@@ -1141,7 +1115,7 @@ function scoreName(score) {
 function scoreLabel(score) {
   const s = parseInt(score);
   if (isNaN(s) || s === 0) return '—';
-  return s + '/100  ' + renderStarsHTML(s) + '  ' + scoreName(s);
+  return s + '/100 — ' + scoreName(s);
 }
 
 function onScoreInput(type) {
