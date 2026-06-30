@@ -436,93 +436,99 @@ const firebaseConfig = {
   messagingSenderId: "484959710944",
   appId: "1:484959710944:web:454059b1f2136c0d73aa85"
 };
-firebase.initializeApp(firebaseConfig);
-const db = firebase.database();
 
-// Use the record's own id as the Firebase key → updates overwrite instead of duplicating.
-// Firebase keys can't contain . # $ [ ] / so we sanitize.
+let db = null;
+let firebaseReady = false;
+try {
+  if (typeof firebase === 'undefined') throw new Error('Firebase SDK not loaded');
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.database();
+  firebaseReady = true;
+} catch (e) {
+  console.error('Firebase init failed:', e);
+}
+// Firebase Realtime DB queues writes made while offline and flushes them on reconnect.
+
+// ============================================================================
+//  DATA LAYER — Firebase is the SINGLE SOURCE OF TRUTH
+//  • Every write goes straight to Firebase.
+//  • One live listener rebuilds the in-memory mirror + UI on every change.
+//  • Deleting = removing from Firebase. No local store, no merge, no deleted-list.
+//  • Offline is handled by Firebase's built-in persistence, not custom logic.
+// ============================================================================
+
+// Firebase keys can't contain . # $ [ ] / — sanitize ids before using as keys.
 function fbKey(id) { return String(id).replace(/[.#$\[\]\/]/g, '_'); }
 
-function saveRecordToFirebase(rec) {
-  try { db.ref('records/' + fbKey(rec.id)).set(rec); } catch(e) { console.warn('Firebase record error:', e); }
-}
+function genId(prefix) { return prefix + '_' + Date.now() + '_' + Math.random().toString(36).slice(2,7); }
 
-function deleteRecordFromFirebase(id) {
-  try { db.ref('records/' + fbKey(id)).remove(); } catch(e) { console.warn('Firebase delete error:', e); }
-}
-
+// ---- Students ----
 function saveStudentToFirebase(student) {
-  try {
-    db.ref('students').orderByChild('name').equalTo(student.name)
-      .once('value', snap => {
-        if (snap.exists()) {
-          const key = Object.keys(snap.val())[0];
-          db.ref('students/' + key).set(student);
-        } else {
-          db.ref('students').push(student);
-        }
-      });
-  } catch(e) { console.warn('Firebase student error:', e); }
+  if (!db) { alert('لا يوجد اتصال بقاعدة البيانات. تأكد من الإنترنت.'); return Promise.reject(); }
+  return db.ref('students/' + fbKey(student.id)).set(student);
+}
+function deleteStudentFromFirebase(id) {
+  if (!db) return Promise.reject();
+  return db.ref('students/' + fbKey(id)).remove();
 }
 
-function deleteStudentFromFirebase(name) {
-  try {
-    db.ref('students').orderByChild('name').equalTo(name).once('value', snap => {
-      if (snap.exists()) {
-        Object.keys(snap.val()).forEach(key => db.ref('students/' + key).remove());
-      }
-    });
-  } catch(e) { console.warn('Firebase student delete error:', e); }
+// ---- Records ----
+function saveRecordToFirebase(rec) {
+  if (!db) { alert('لا يوجد اتصال بقاعدة البيانات. تأكد من الإنترنت.'); return Promise.reject(); }
+  return db.ref('records/' + fbKey(rec.id)).set(rec);
+}
+function deleteRecordFromFirebase(id) {
+  if (!db) return Promise.reject();
+  return db.ref('records/' + fbKey(id)).remove();
 }
 
-// Firebase is the source of truth once connected. We attach LIVE listeners (.on)
-// so every open device updates in real time — including deletions, which a
-// merge-only approach can never reflect (a missing key doesn't "merge away" a local item).
-let liveSyncStarted = false;
+// ---- Live sync: the ONLY way data enters the app ----
+let syncStarted = false;
+let firstStudentsLoaded = false, firstRecordsLoaded = false;
 
-function applyRemoteSnapshot(onFirstSync) {
-  let firstRecords = true, firstStudents = true;
-  const maybeFirstDone = () => { if (firstRecords===false && firstStudents===false && onFirstSync) { onFirstSync(); onFirstSync = null; } };
-
-  db.ref('records').on('value', snap => {
-    try {
-      const remote = snap.val() || {};
-      const deletedIds = getDeletedIds();
-      let arr = Object.values(remote).filter(r => r && r.id != null && !deletedIds.has(String(r.id)));
-      // if anything we'd locally deleted is still present remotely, the delete write
-      // never landed (offline/race) — re-issue it now that we're connected again.
-      Object.values(remote).forEach(r => {
-        if (r && r.id != null && deletedIds.has(String(r.id))) {
-          db.ref('records/' + fbKey(r.id)).remove();
-        }
-      });
-      if (arr.length || firstRecords) { // accept empty only as a real "no data yet" state on first load
-        records = arr;
-        saveData();
-        refreshVisibleScreens();
-      }
-    } catch(e) { console.warn('records listener failed', e); }
-    firstRecords = false; maybeFirstDone();
-  }, err => { console.warn('Firebase records listener error', err); firstRecords = false; maybeFirstDone(); });
+function startSync() {
+  if (syncStarted) return;
+  if (!firebaseReady || !db) {
+    const sub = document.getElementById('header-sub');
+    if (sub) { sub.dataset.syncing = '0'; sub.textContent = '⚠️ تعذّر الاتصال — تأكد من الإنترنت وأعد التحميل'; }
+    return;
+  }
+  syncStarted = true;
 
   db.ref('students').on('value', snap => {
-    try {
-      const remote = snap.val() || {};
-      const arr = Object.values(remote).filter(s => s && s.name);
-      if (arr.length) { // never wipe local students if remote briefly looks empty
-        students = arr;
-        saveData();
-        refreshVisibleScreens();
-      }
-    } catch(e) { console.warn('students listener failed', e); }
-    firstStudents = false; maybeFirstDone();
-  }, err => { console.warn('Firebase students listener error', err); firstStudents = false; maybeFirstDone(); });
+    const val = snap.val() || {};
+    students = Object.values(val).filter(s => s && s.id);
+    firstStudentsLoaded = true;
+    refreshVisibleScreens();
+    markConnected();
+  }, err => { console.warn('students sync error', err); showConnectionError(); });
+
+  db.ref('records').on('value', snap => {
+    const val = snap.val() || {};
+    records = Object.values(val).filter(r => r && r.id);
+    firstRecordsLoaded = true;
+    refreshVisibleScreens();
+    markConnected();
+  }, err => { console.warn('records sync error', err); showConnectionError(); });
+}
+
+function markConnected() {
+  if (firstStudentsLoaded && firstRecordsLoaded) {
+    const sub = document.getElementById('header-sub');
+    if (sub && sub.dataset.syncing === '1') { sub.dataset.syncing = '0'; updateHeader(); }
+  }
+}
+
+function showConnectionError() {
+  const sub = document.getElementById('header-sub');
+  if (sub) sub.textContent = '⚠️ لا يوجد اتصال — في انتظار الإنترنت';
 }
 
 function refreshVisibleScreens() {
-  const curStudent = document.getElementById('student-select') ? document.getElementById('student-select').value : '';
+  const sel = document.getElementById('student-select');
+  const curStudent = sel ? sel.value : '';
   renderStudentSelect();
-  if (curStudent) document.getElementById('student-select').value = curStudent;
+  if (curStudent && sel) sel.value = curStudent;
   renderStudentList();
   updateHeader();
   const active = document.querySelector('.screen.active');
@@ -530,13 +536,7 @@ function refreshVisibleScreens() {
     if (active.id === 'screen-log') renderLog();
     else if (active.id === 'screen-stats') renderStats();
   }
-  if (curStudent) onStudentChange();
-}
-
-function syncFromFirebase(onDone) {
-  if (liveSyncStarted) { if (onDone) onDone(); return; }
-  liveSyncStarted = true;
-  applyRemoteSnapshot(onDone);
+  if (curStudent && editingRecordId === null) onStudentChange();
 }
 
 const STAR_LABELS = ['','ضعيف','مقبول','جيد','جيد جداً','ممتاز'];
@@ -585,23 +585,6 @@ const SURAS = [
   ['الفلق',5],['الناس',6]
 ];
 
-const DEFAULT_STUDENTS = [
-  {name:'زيد احمد'},{name:'عبد الله احمد'},{name:'ريتال رضا'},{name:'رويدا رضا'},
-  {name:'يزن رفقي'},{name:'نادين رفقي'},{name:'ساجد محمود ناجي'},{name:'اسر محمود ناجي'},
-  {name:'يوسف خالد'},{name:'انس هيثم'},{name:'ياسين هيثم'},{name:'فاروق طارق'},
-  {name:'احمد حسام'},{name:'فريدة حسام'},{name:'عمر احمد خضر'},{name:'عبد الرحمن جار'},
-  {name:'معاذ جار'},{name:'كنزي وليد'},{name:'كندة'},{name:'سيف محمد'},
-  {name:'ياسين محمد'},{name:'حسن عيد'},{name:'مؤمن'},{name:'اياد ايمن'},
-  {name:'ياسين رزق'},{name:'سلمى ابراهيم'},{name:'ياسين ابراهيم'},
-  {name:'حازم محمد حمدي'},{name:'حمزة محمد حمدي'},{name:'حمدي محمد حمدي'},
-  {name:'عمر محمد يحيى'},{name:'عمار محمد يحيى'},{name:'عمر احمد عبد المنعم'},
-  {name:'ليلي احمد عبد المنعم'},{name:'ادم احمد'},{name:'تاج بلال'},
-  {name:'جمال احمد جمال'},{name:'نبيل احمد جمال'},{name:'مالك محمد سمير'},
-  {name:'محمد طارق فاروق'},{name:'مروان اشرف'},{name:'طارق عيد'},
-  {name:'بتول احمد'},{name:'احمد ياسر'},{name:'زين الدين اسلام'},
-  {name:'محمود عمرو محمود'},{name:'يحيى محمد'},{name:'يارا وليد'},
-  {name:'انس وليد'},{name:'زياد جابر شريف'}
-];
 
 let students = [], records = [], starVals = {loh:0, tajweed:0}, starScores = {loh:0, tajweed:0, 'prev-loh':0, 'prev-madi':0};
 let madiRows = []; // [{id, stars}]
@@ -610,33 +593,7 @@ let madiRowCount = 0;
 const suraMap = {};
 SURAS.forEach(([n,c]) => suraMap[n]=c);
 
-function loadData() {
-  try {
-    const raw = JSON.parse(localStorage.getItem('qr_students') || 'null');
-    if (raw) {
-      // migrate old string array to objects
-      students = raw.map(s => typeof s === 'string' ? {name:s} : s);
-    } else {
-      students = DEFAULT_STUDENTS;
-    }
-  } catch(e) { students = DEFAULT_STUDENTS; }
-  try { records = JSON.parse(localStorage.getItem('qr_records') || '[]'); } catch(e) { records = []; }
-  // migrate: if old record has loh.sura but no newLoh, copy it to newLoh
-  records.forEach(r => {
-    if (!r.attendance_only && !r.newLoh && r.loh && r.loh.sura) {
-      r.newLoh = { sura: r.loh.sura, from: r.loh.from, to: r.loh.to };
-    }
-    if (!r.attendance_only && !r.newMadi && r.madi) {
-      const arr = Array.isArray(r.madi) ? r.madi : [r.madi];
-      r.newMadi = arr.filter(m => m && m.sura);
-    }
-  });
-}
 
-function saveData() {
-  localStorage.setItem('qr_students', JSON.stringify(students));
-  localStorage.setItem('qr_records', JSON.stringify(records));
-}
 
 // السور مرتبة عكسياً (الناس أولاً)
 const SURAS_REVERSED = [...SURAS].reverse();
@@ -695,66 +652,8 @@ function hideDropdown(prefix, immediate) {
   }
 }
 
-const IMPORTED_ATTENDANCE = [{"id": "att_احمد حسام_2026-06-04", "date": "2026-06-04", "student": "احمد حسام", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_احمد ياسر_2026-06-04", "date": "2026-06-04", "student": "احمد ياسر", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_ادم احمد_2026-06-04", "date": "2026-06-04", "student": "ادم احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_انس هيثم_2026-06-04", "date": "2026-06-04", "student": "انس هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_انس وليد_2026-06-04", "date": "2026-06-04", "student": "انس وليد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_اياد ايمن_2026-06-04", "date": "2026-06-04", "student": "اياد ايمن", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_بتول احمد_2026-06-04", "date": "2026-06-04", "student": "بتول احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_تاج بلال_2026-06-04", "date": "2026-06-04", "student": "تاج بلال", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_جمال احمد جمال_2026-06-04", "date": "2026-06-04", "student": "جمال احمد جمال", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_حازم محمد حمدي_2026-06-04", "date": "2026-06-04", "student": "حازم محمد حمدي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_حمدي محمد حمدي_2026-06-04", "date": "2026-06-04", "student": "حمدي محمد حمدي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_حمزة محمد حمدي_2026-06-04", "date": "2026-06-04", "student": "حمزة محمد حمدي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_رويدا رضا_2026-06-04", "date": "2026-06-04", "student": "رويدا رضا", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_ريتال رضا_2026-06-04", "date": "2026-06-04", "student": "ريتال رضا", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_زياد جابر شريف_2026-06-04", "date": "2026-06-04", "student": "زياد جابر شريف", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_زيد احمد_2026-06-04", "date": "2026-06-04", "student": "زيد احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_زين الدين اسلام_2026-06-04", "date": "2026-06-04", "student": "زين الدين اسلام", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_سيف محمد_2026-06-04", "date": "2026-06-04", "student": "سيف محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_طارق عيد_2026-06-04", "date": "2026-06-04", "student": "طارق عيد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_عبد الله احمد_2026-06-04", "date": "2026-06-04", "student": "عبد الله احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_عمار محمد يحيى_2026-06-04", "date": "2026-06-04", "student": "عمار محمد يحيى", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_عمر  محمد يحي_2026-06-04", "date": "2026-06-04", "student": "عمر  محمد يحي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_عمر احمد  عبد المنعم_2026-06-04", "date": "2026-06-04", "student": "عمر احمد  عبد المنعم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_عمر احمد خضر_2026-06-04", "date": "2026-06-04", "student": "عمر احمد خضر", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_فاروق طارق_2026-06-04", "date": "2026-06-04", "student": "فاروق طارق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_فريدة حسام_2026-06-04", "date": "2026-06-04", "student": "فريدة حسام", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_ليلي احمد عبد المنعم_2026-06-04", "date": "2026-06-04", "student": "ليلي احمد عبد المنعم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_مؤمن_2026-06-04", "date": "2026-06-04", "student": "مؤمن", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_مالك محمد سمير_2026-06-04", "date": "2026-06-04", "student": "مالك محمد سمير", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_محمد طارق فاروق_2026-06-04", "date": "2026-06-04", "student": "محمد طارق فاروق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_محمود عمرو محمود محمد_2026-06-04", "date": "2026-06-04", "student": "محمود عمرو محمود محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_مروان  اشرف_2026-06-04", "date": "2026-06-04", "student": "مروان  اشرف", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_نادين رفقي_2026-06-04", "date": "2026-06-04", "student": "نادين رفقي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_نبيل احمد جمال_2026-06-04", "date": "2026-06-04", "student": "نبيل احمد جمال", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_يارا وليد_2026-06-04", "date": "2026-06-04", "student": "يارا وليد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_ياسين  محمد_2026-06-04", "date": "2026-06-04", "student": "ياسين  محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_ياسين رزق_2026-06-04", "date": "2026-06-04", "student": "ياسين رزق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_ياسين هيثم_2026-06-04", "date": "2026-06-04", "student": "ياسين هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_يحيي محمد_2026-06-04", "date": "2026-06-04", "student": "يحيي محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_يزن رفقي_2026-06-04", "date": "2026-06-04", "student": "يزن رفقي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_يوسف خالد_2026-06-04", "date": "2026-06-04", "student": "يوسف خالد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "حضور إضافي — 4 يونيو"}, {"id": "att_احمد حسام_2026-06-06", "date": "2026-06-06", "student": "احمد حسام", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_انس هيثم_2026-06-06", "date": "2026-06-06", "student": "انس هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_اياد ايمن_2026-06-06", "date": "2026-06-06", "student": "اياد ايمن", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_رويدا رضا_2026-06-06", "date": "2026-06-06", "student": "رويدا رضا", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ريتال رضا_2026-06-06", "date": "2026-06-06", "student": "ريتال رضا", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_سلمى ابراهيم_2026-06-06", "date": "2026-06-06", "student": "سلمى ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمر احمد خضر_2026-06-06", "date": "2026-06-06", "student": "عمر احمد خضر", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_فريدة حسام_2026-06-06", "date": "2026-06-06", "student": "فريدة حسام", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين ابراهيم_2026-06-06", "date": "2026-06-06", "student": "ياسين ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين هيثم_2026-06-06", "date": "2026-06-06", "student": "ياسين هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_احمد حسام_2026-06-08", "date": "2026-06-08", "student": "احمد حسام", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_انس هيثم_2026-06-08", "date": "2026-06-08", "student": "انس هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_زيد احمد_2026-06-08", "date": "2026-06-08", "student": "زيد احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_سلمى ابراهيم_2026-06-08", "date": "2026-06-08", "student": "سلمى ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عبد الله احمد_2026-06-08", "date": "2026-06-08", "student": "عبد الله احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_فريدة حسام_2026-06-08", "date": "2026-06-08", "student": "فريدة حسام", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين ابراهيم_2026-06-08", "date": "2026-06-08", "student": "ياسين ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين رزق_2026-06-08", "date": "2026-06-08", "student": "ياسين رزق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين هيثم_2026-06-08", "date": "2026-06-08", "student": "ياسين هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_احمد حسام_2026-06-13", "date": "2026-06-13", "student": "احمد حسام", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ادم احمد_2026-06-13", "date": "2026-06-13", "student": "ادم احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_اياد ايمن_2026-06-13", "date": "2026-06-13", "student": "اياد ايمن", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_حازم محمد حمدي_2026-06-13", "date": "2026-06-13", "student": "حازم محمد حمدي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_حمدي محمد حمدي_2026-06-13", "date": "2026-06-13", "student": "حمدي محمد حمدي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_حمزة محمد حمدي_2026-06-13", "date": "2026-06-13", "student": "حمزة محمد حمدي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_رويدا رضا_2026-06-13", "date": "2026-06-13", "student": "رويدا رضا", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ريتال رضا_2026-06-13", "date": "2026-06-13", "student": "ريتال رضا", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_زيد احمد_2026-06-13", "date": "2026-06-13", "student": "زيد احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_سلمى ابراهيم_2026-06-13", "date": "2026-06-13", "student": "سلمى ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عبد الله احمد_2026-06-13", "date": "2026-06-13", "student": "عبد الله احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمار محمد يحيى_2026-06-13", "date": "2026-06-13", "student": "عمار محمد يحيى", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمر  محمد يحي_2026-06-13", "date": "2026-06-13", "student": "عمر  محمد يحي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمر احمد  عبد المنعم_2026-06-13", "date": "2026-06-13", "student": "عمر احمد  عبد المنعم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمر احمد خضر_2026-06-13", "date": "2026-06-13", "student": "عمر احمد خضر", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_فاروق طارق_2026-06-13", "date": "2026-06-13", "student": "فاروق طارق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_فريدة حسام_2026-06-13", "date": "2026-06-13", "student": "فريدة حسام", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ليلي احمد عبد المنعم_2026-06-13", "date": "2026-06-13", "student": "ليلي احمد عبد المنعم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_مؤمن_2026-06-13", "date": "2026-06-13", "student": "مؤمن", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_نادين رفقي_2026-06-13", "date": "2026-06-13", "student": "نادين رفقي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين  محمد_2026-06-13", "date": "2026-06-13", "student": "ياسين  محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين ابراهيم_2026-06-13", "date": "2026-06-13", "student": "ياسين ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين رزق_2026-06-13", "date": "2026-06-13", "student": "ياسين رزق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_يزن رفقي_2026-06-13", "date": "2026-06-13", "student": "يزن رفقي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_يوسف خالد_2026-06-13", "date": "2026-06-13", "student": "يوسف خالد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ادم احمد_2026-06-15", "date": "2026-06-15", "student": "ادم احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_انس هيثم_2026-06-15", "date": "2026-06-15", "student": "انس هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_تاج بلال_2026-06-15", "date": "2026-06-15", "student": "تاج بلال", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_جمال احمد جمال_2026-06-15", "date": "2026-06-15", "student": "جمال احمد جمال", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_حازم محمد حمدي_2026-06-15", "date": "2026-06-15", "student": "حازم محمد حمدي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_حمدي محمد حمدي_2026-06-15", "date": "2026-06-15", "student": "حمدي محمد حمدي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_حمزة محمد حمدي_2026-06-15", "date": "2026-06-15", "student": "حمزة محمد حمدي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_سلمى ابراهيم_2026-06-15", "date": "2026-06-15", "student": "سلمى ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_سيف محمد_2026-06-15", "date": "2026-06-15", "student": "سيف محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمار محمد يحيى_2026-06-15", "date": "2026-06-15", "student": "عمار محمد يحيى", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمر  محمد يحي_2026-06-15", "date": "2026-06-15", "student": "عمر  محمد يحي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمر احمد  عبد المنعم_2026-06-15", "date": "2026-06-15", "student": "عمر احمد  عبد المنعم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمر احمد خضر_2026-06-15", "date": "2026-06-15", "student": "عمر احمد خضر", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_فاروق طارق_2026-06-15", "date": "2026-06-15", "student": "فاروق طارق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ليلي احمد عبد المنعم_2026-06-15", "date": "2026-06-15", "student": "ليلي احمد عبد المنعم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_مالك محمد سمير_2026-06-15", "date": "2026-06-15", "student": "مالك محمد سمير", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_نبيل احمد جمال_2026-06-15", "date": "2026-06-15", "student": "نبيل احمد جمال", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين  محمد_2026-06-15", "date": "2026-06-15", "student": "ياسين  محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين ابراهيم_2026-06-15", "date": "2026-06-15", "student": "ياسين ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين رزق_2026-06-15", "date": "2026-06-15", "student": "ياسين رزق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين هيثم_2026-06-15", "date": "2026-06-15", "student": "ياسين هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_احمد ياسر_2026-06-17", "date": "2026-06-17", "student": "احمد ياسر", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ادم احمد_2026-06-17", "date": "2026-06-17", "student": "ادم احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_انس هيثم_2026-06-17", "date": "2026-06-17", "student": "انس هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_اياد ايمن_2026-06-17", "date": "2026-06-17", "student": "اياد ايمن", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_بتول احمد_2026-06-17", "date": "2026-06-17", "student": "بتول احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_جمال احمد جمال_2026-06-17", "date": "2026-06-17", "student": "جمال احمد جمال", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_زيد احمد_2026-06-17", "date": "2026-06-17", "student": "زيد احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_سلمى ابراهيم_2026-06-17", "date": "2026-06-17", "student": "سلمى ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_سيف محمد_2026-06-17", "date": "2026-06-17", "student": "سيف محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_طارق عيد_2026-06-17", "date": "2026-06-17", "student": "طارق عيد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمار محمد يحيى_2026-06-17", "date": "2026-06-17", "student": "عمار محمد يحيى", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمر احمد  عبد المنعم_2026-06-17", "date": "2026-06-17", "student": "عمر احمد  عبد المنعم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_فاروق طارق_2026-06-17", "date": "2026-06-17", "student": "فاروق طارق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ليلي احمد عبد المنعم_2026-06-17", "date": "2026-06-17", "student": "ليلي احمد عبد المنعم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_مالك محمد سمير_2026-06-17", "date": "2026-06-17", "student": "مالك محمد سمير", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_محمد طارق فاروق_2026-06-17", "date": "2026-06-17", "student": "محمد طارق فاروق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_مروان  اشرف_2026-06-17", "date": "2026-06-17", "student": "مروان  اشرف", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_نبيل احمد جمال_2026-06-17", "date": "2026-06-17", "student": "نبيل احمد جمال", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين  محمد_2026-06-17", "date": "2026-06-17", "student": "ياسين  محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين ابراهيم_2026-06-17", "date": "2026-06-17", "student": "ياسين ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين رزق_2026-06-17", "date": "2026-06-17", "student": "ياسين رزق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين هيثم_2026-06-17", "date": "2026-06-17", "student": "ياسين هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_احمد ياسر_2026-06-20", "date": "2026-06-20", "student": "احمد ياسر", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ادم احمد_2026-06-20", "date": "2026-06-20", "student": "ادم احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_انس هيثم_2026-06-20", "date": "2026-06-20", "student": "انس هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_اياد ايمن_2026-06-20", "date": "2026-06-20", "student": "اياد ايمن", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_جمال احمد جمال_2026-06-20", "date": "2026-06-20", "student": "جمال احمد جمال", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_زين الدين اسلام_2026-06-20", "date": "2026-06-20", "student": "زين الدين اسلام", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_سلمى ابراهيم_2026-06-20", "date": "2026-06-20", "student": "سلمى ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_طارق عيد_2026-06-20", "date": "2026-06-20", "student": "طارق عيد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمار محمد يحيى_2026-06-20", "date": "2026-06-20", "student": "عمار محمد يحيى", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمر احمد  عبد المنعم_2026-06-20", "date": "2026-06-20", "student": "عمر احمد  عبد المنعم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمر احمد خضر_2026-06-20", "date": "2026-06-20", "student": "عمر احمد خضر", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_فاروق طارق_2026-06-20", "date": "2026-06-20", "student": "فاروق طارق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ليلي احمد عبد المنعم_2026-06-20", "date": "2026-06-20", "student": "ليلي احمد عبد المنعم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_محمد طارق فاروق_2026-06-20", "date": "2026-06-20", "student": "محمد طارق فاروق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_محمود عمرو محمود محمد_2026-06-20", "date": "2026-06-20", "student": "محمود عمرو محمود محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_مروان  اشرف_2026-06-20", "date": "2026-06-20", "student": "مروان  اشرف", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_نبيل احمد جمال_2026-06-20", "date": "2026-06-20", "student": "نبيل احمد جمال", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين  محمد_2026-06-20", "date": "2026-06-20", "student": "ياسين  محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين ابراهيم_2026-06-20", "date": "2026-06-20", "student": "ياسين ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين هيثم_2026-06-20", "date": "2026-06-20", "student": "ياسين هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_يحيي محمد_2026-06-20", "date": "2026-06-20", "student": "يحيي محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ادم احمد_2026-06-22", "date": "2026-06-22", "student": "ادم احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_انس هيثم_2026-06-22", "date": "2026-06-22", "student": "انس هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_انس وليد_2026-06-22", "date": "2026-06-22", "student": "انس وليد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_تاج بلال_2026-06-22", "date": "2026-06-22", "student": "تاج بلال", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_زيد احمد_2026-06-22", "date": "2026-06-22", "student": "زيد احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_زين الدين اسلام_2026-06-22", "date": "2026-06-22", "student": "زين الدين اسلام", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_سلمى ابراهيم_2026-06-22", "date": "2026-06-22", "student": "سلمى ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_سيف محمد_2026-06-22", "date": "2026-06-22", "student": "سيف محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمار محمد يحيى_2026-06-22", "date": "2026-06-22", "student": "عمار محمد يحيى", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_فاروق طارق_2026-06-22", "date": "2026-06-22", "student": "فاروق طارق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ليلي احمد عبد المنعم_2026-06-22", "date": "2026-06-22", "student": "ليلي احمد عبد المنعم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_مالك محمد سمير_2026-06-22", "date": "2026-06-22", "student": "مالك محمد سمير", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_محمود عمرو محمود محمد_2026-06-22", "date": "2026-06-22", "student": "محمود عمرو محمود محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_يارا وليد_2026-06-22", "date": "2026-06-22", "student": "يارا وليد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين  محمد_2026-06-22", "date": "2026-06-22", "student": "ياسين  محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين ابراهيم_2026-06-22", "date": "2026-06-22", "student": "ياسين ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين رزق_2026-06-22", "date": "2026-06-22", "student": "ياسين رزق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين هيثم_2026-06-22", "date": "2026-06-22", "student": "ياسين هيثم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_يحيي محمد_2026-06-22", "date": "2026-06-22", "student": "يحيي محمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_زياد جابر شريف_2026-06-24", "date": "2026-06-24", "student": "زياد جابر شريف", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_زيد احمد_2026-06-24", "date": "2026-06-24", "student": "زيد احمد", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_سلمى ابراهيم_2026-06-24", "date": "2026-06-24", "student": "سلمى ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمار محمد يحيى_2026-06-24", "date": "2026-06-24", "student": "عمار محمد يحيى", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_عمر  محمد يحي_2026-06-24", "date": "2026-06-24", "student": "عمر  محمد يحي", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_فاروق طارق_2026-06-24", "date": "2026-06-24", "student": "فاروق طارق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين ابراهيم_2026-06-24", "date": "2026-06-24", "student": "ياسين ابراهيم", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}, {"id": "att_ياسين رزق_2026-06-24", "date": "2026-06-24", "student": "ياسين رزق", "attendance_only": true, "loh": {"sura": "", "from": "", "to": "", "stars": 0}, "madi": {"sura": "", "from": "", "to": "", "stars": 0}, "note": "مستورد من سجل الحضور"}];
 
-// Deleted ids are shared across ALL devices via Firebase (not just local) so that
-// a delete on Device A is respected by Device B even if B independently re-imports
-// the bulk attendance data or hasn't refreshed since the delete happened.
-let remoteDeletedIds = new Set(); // populated live from Firebase, merged with local cache
 
-function getDeletedIds() {
-  let local = [];
-  try { local = JSON.parse(localStorage.getItem('qr_deleted_ids') || '[]'); } catch(e) {}
-  const merged = new Set(local);
-  remoteDeletedIds.forEach(id => merged.add(id));
-  return merged;
-}
-
-function markDeleted(id) {
-  const set = getDeletedIds();
-  set.add(String(id));
-  localStorage.setItem('qr_deleted_ids', JSON.stringify([...set]));
-  // also record it in Firebase so every other device learns about this delete
-  try { db.ref('deletedIds/' + fbKey(id)).set(true); } catch(e) { console.warn('mark deleted sync failed', e); }
-}
-
-function listenDeletedIds() {
-  try {
-    db.ref('deletedIds').on('value', snap => {
-      const val = snap.val() || {};
-      remoteDeletedIds = new Set(Object.keys(val));
-      // merge into local cache too, so it survives offline
-      const local = getDeletedIds();
-      localStorage.setItem('qr_deleted_ids', JSON.stringify([...local]));
-    });
-  } catch(e) { console.warn('listenDeletedIds failed', e); }
-}
-
-function importAttendanceIfNeeded() {
-  // Only import once
-  if (localStorage.getItem('qr_att_imported') === '6') return;
-  // Merge: add records that don't already exist AND were not explicitly deleted before
-  const existingIds = new Set(records.map(r => r.id));
-  const deletedIds = getDeletedIds();
-  let added = 0;
-  IMPORTED_ATTENDANCE.forEach(r => {
-    if (!existingIds.has(r.id) && !deletedIds.has(String(r.id))) {
-      records.push(r);
-      added++;
-    }
-  });
-  if (added > 0) {
-    saveData();
-    // push new attendance records to Firebase
-    IMPORTED_ATTENDANCE.forEach(r => {
-      if (!existingIds.has(r.id) && !deletedIds.has(String(r.id))) {
-        saveRecordToFirebase(r);
-      }
-    });
-    console.log('Imported ' + added + ' attendance records');
-  }
-  localStorage.setItem('qr_att_imported', '6');
-}
 
 function makeMadiRowId() { return 'madi-row-' + (++madiRowCount); }
 
@@ -877,39 +776,22 @@ function onStudentChange() {
 }
 
 function init() {
-  loadData();
   buildSuraOptions();
   addMadiRow();
   document.getElementById('session-date').value = new Date().toISOString().slice(0,10);
-  renderStudentSelect();
-  renderStudentList();
-  updateHeader();
 
-  // Start live sync — every connected device now updates in real time (including deletions)
   const sub = document.getElementById('header-sub');
-  if (sub) sub.textContent = 'جاري المزامنة…';
+  if (sub) { sub.textContent = 'جاري المزامنة…'; sub.dataset.syncing = '1'; }
 
-  // Fetch the shared "deleted ids" list FIRST and only once it's known, run the
-  // bulk attendance import — otherwise a device could re-import a record that
-  // another device already deleted, before learning about that deletion.
-  db.ref('deletedIds').once('value', snap => {
-    const val = snap.val() || {};
-    remoteDeletedIds = new Set(Object.keys(val));
-    const local = getDeletedIds();
-    localStorage.setItem('qr_deleted_ids', JSON.stringify([...local]));
-    listenDeletedIds(); // keep listening live afterwards
-    importAttendanceIfNeeded();
-    syncFromFirebase(refreshVisibleScreens);
-  }, err => {
-    console.warn('initial deletedIds fetch failed', err);
-    importAttendanceIfNeeded(); // fall back so the app still works offline
-    syncFromFirebase(refreshVisibleScreens);
-  });
+  // The single source of truth. Everything the app shows comes from these live listeners.
+  startSync();
 }
 
 function updateHeader() {
+  const sub = document.getElementById('header-sub');
+  if (sub && sub.dataset.syncing === '1') return; // keep "جاري المزامنة…" until first data arrives
   const today = new Date().toLocaleDateString('ar-EG',{weekday:'long',day:'numeric',month:'long'});
-  document.getElementById('header-sub').textContent = today + ' · ' + students.length + ' طالب';
+  if (sub) sub.textContent = today + ' · ' + students.length + ' طالب';
 }
 
 function getStudentName(s) { return typeof s === 'string' ? s : s.name; }
@@ -939,27 +821,27 @@ function renderStudentList() {
     const phoneDad = (s.phoneSecondary||s.phoneDad) ? `<span style="font-size:11px;color:var(--text-hint);margin-right:8px">ثانوي: ${s.phoneSecondary||s.phoneDad}</span>` : '';
     return `<div class="student-row">
       <div class="student-avatar">${initials}</div>
-      <div class="student-info" onclick="openStudentModal(${i})">
+      <div class="student-info" onclick="openStudentModal('${s.id}')">
         <div class="student-name-main">${name}</div>
         ${meta ? `<div class="student-meta-line">${meta}</div>` : ''}
         <div style="margin-top:2px">${phoneMom}${phoneDad}</div>
         <div class="student-meta-line">${count} جلسة مسجلة</div>
       </div>
       <div class="student-actions">
-        <button class="icon-btn" onclick="openStudentModal(${i})" aria-label="تعديل">✏️</button>
-        <button class="icon-btn danger" onclick="deleteStudent(event,${i})" aria-label="حذف">🗑</button>
+        <button class="icon-btn" onclick="openStudentModal('${s.id}')" aria-label="تعديل">✏️</button>
+        <button class="icon-btn danger" onclick="deleteStudent(event,'${s.id}')" aria-label="حذف">🗑</button>
       </div>
     </div>`;
   }).join('');
 }
 
 /* ---- Modal ---- */
-function openStudentModal(idx) {
+function openStudentModal(id) {
   const modal = document.getElementById('student-modal');
-  document.getElementById('modal-student-idx').value = idx === null ? '' : idx;
-  document.getElementById('modal-title').textContent = idx === null ? 'إضافة طالب جديد' : 'تعديل بيانات الطالب';
-  if (idx !== null) {
-    const s = students[idx];
+  const s = id ? students.find(st => st.id === id) : null;
+  document.getElementById('modal-student-idx').value = s ? s.id : '';
+  document.getElementById('modal-title').textContent = s ? 'تعديل بيانات الطالب' : 'إضافة طالب جديد';
+  if (s) {
     document.getElementById('modal-name').value = getStudentName(s);
     document.getElementById('modal-age').value = s.age || '';
     document.getElementById('modal-grade').value = s.grade || '';
@@ -969,7 +851,7 @@ function openStudentModal(idx) {
     document.getElementById('modal-phone-secondary').value = s.phoneSecondary || s.phoneDad || '';
   } else {
     ['modal-name','modal-age','modal-school','modal-phone-primary','modal-phone-secondary'].forEach(id => document.getElementById(id).value = '');
-  document.getElementById('modal-phone-type').value = 'أم';
+    document.getElementById('modal-phone-type').value = 'أم';
     document.getElementById('modal-grade').value = '';
   }
   modal.classList.add('open');
@@ -987,8 +869,10 @@ function closeModalOnBg(e) {
 function saveStudentModal() {
   const name = document.getElementById('modal-name').value.trim();
   if (!name) { document.getElementById('modal-name').focus(); return; }
-  const idx = document.getElementById('modal-student-idx').value;
+  const editId = document.getElementById('modal-student-idx').value; // holds student id (or '')
+  const existing = editId ? students.find(s => s.id === editId) : null;
   const obj = {
+    id: existing ? existing.id : genId('s'),
     name,
     age: document.getElementById('modal-age').value || '',
     grade: document.getElementById('modal-grade').value || '',
@@ -997,29 +881,20 @@ function saveStudentModal() {
     phonePrimary: document.getElementById('modal-phone-primary').value.trim(),
     phoneSecondary: document.getElementById('modal-phone-secondary').value.trim(),
   };
-  if (idx === '') {
-    // check duplicate
-    if (students.find(s=>getStudentName(s)===name)) { alert('الاسم موجود بالفعل'); return; }
-    students.push(obj);
-  } else {
-    students[parseInt(idx)] = obj;
-  }
-  saveData();
+  if (!existing && students.find(s => getStudentName(s) === name)) { alert('الاسم موجود بالفعل'); return; }
+  // Write straight to Firebase — the live listener updates the UI for every device.
   saveStudentToFirebase(obj);
-  renderStudentSelect();
-  renderStudentList();
-  updateHeader();
   closeStudentModal();
-  showToast();
+  showToast(existing ? '✓ تم التحديث' : '✓ تم الحفظ بنجاح');
   syncToSheets('student', {student: obj});
 }
 
-function deleteStudent(e, i) {
+function deleteStudent(e, id) {
   e.stopPropagation();
-  const name = getStudentName(students[i]);
-  if (!confirm(`حذف "${name}"؟`)) return;
-  students.splice(i,1);
-  saveData(); deleteStudentFromFirebase(name); renderStudentSelect(); renderStudentList(); updateHeader();
+  const s = students.find(st => st.id === id);
+  if (!s) return;
+  if (!confirm(`حذف "${getStudentName(s)}"؟`)) return;
+  deleteStudentFromFirebase(id); // listener removes it from every device
 }
 
 /* ---- Sura validation ---- */
@@ -1078,8 +953,10 @@ function saveRecord() {
   const lohSura = document.getElementById('loh-sura').value;
   const isEditing = editingRecordId !== null;
   const existing = isEditing ? records.find(r => String(r.id) === String(editingRecordId)) : null;
+  const sObj = students.find(s => getStudentName(s) === student);
   const rec = {
-    id: existing ? existing.id : (Date.now() + '_' + (records.length)),
+    id: existing ? existing.id : genId('r'),
+    studentId: sObj ? sObj.id : (existing ? existing.studentId : ''),
     date: document.getElementById('session-date').value,
     student,
     loh: { score: starScores['prev-loh']||0, stars: scoreToStars(starScores['prev-loh']||0) },
@@ -1092,19 +969,9 @@ function saveRecord() {
     if (!validateAyah('tajweed')) { alert('يوجد خطأ في آيات التجويد'); return; }
     rec.tajweed = { sura:document.getElementById('tajweed-sura').value, from:document.getElementById('tajweed-from').value, to:document.getElementById('tajweed-to').value, stars:starVals.tajweed, score:starScores.tajweed||0, note:document.getElementById('tajweed-note').value.trim() };
   }
-  if (isEditing && existing) {
-    const idx = records.findIndex(r => String(r.id) === String(editingRecordId));
-    records[idx] = rec;
-  } else {
-    records.push(rec);
-  }
-  saveData();
+  // Write straight to Firebase. The live listener updates every device, including this one.
   saveRecordToFirebase(rec);
-  // also re-run migration on new record so onStudentChange sees newLoh immediately
-  if (!rec.newLoh && rec.loh && rec.loh.sura) rec.newLoh = { sura: rec.loh.sura, from: rec.loh.from, to: rec.loh.to };
-  if (!rec.newMadi && rec.madi) { const arr = Array.isArray(rec.madi) ? rec.madi : [rec.madi]; rec.newMadi = arr.filter(m => m && m.sura); }
   syncToSheets('record', {record: rec});
-  const sObj = students.find(s=>getStudentName(s)===student);
   const wasEditing = isEditing;
   editingRecordId = null;
   const btn = document.querySelector('.save-btn');
@@ -1184,16 +1051,12 @@ function renderLog() {
 }
 
 function deleteRecord(id) {
-  const idx = records.findIndex(r => String(r.id) === String(id));
-  if (idx < 0) return;
-  const r = records[idx];
+  const r = records.find(rr => String(rr.id) === String(id));
+  if (!r) return;
   const label = r.attendance_only ? `حضور ${r.student}` : `جلسة ${r.student}`;
   if (!confirm(`حذف "${label}"؟\nلا يمكن التراجع.`)) return;
-  records.splice(idx, 1);
-  markDeleted(id); // remember forever so re-import/migration never brings it back
-  saveData();
+  // Remove from Firebase. The live listener removes it from every device, permanently.
   deleteRecordFromFirebase(id);
-  renderLog();
   showToast('✓ تم الحذف');
 }
 
